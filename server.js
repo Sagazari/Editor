@@ -1,9 +1,9 @@
-// Servidor mínimo (sem dependências): serve o editor e faz proxy para a xAI.
-// A chave fica só aqui, na variável de ambiente XAI_API_KEY (Render > Environment).
+// Servidor mínimo (sem dependências): serve o editor e faz proxy para o Groq.
+// A chave fica só aqui, na variável de ambiente GROQ_API_KEY (Render > Environment).
 const http=require('http'),fs=require('fs'),path=require('path');
-const KEY=process.env.XAI_API_KEY,MODEL=process.env.XAI_MODEL||'grok-4.20-non-reasoning',PER_MIN=+process.env.LIMIT_PER_MIN||10,PER_DAY=+process.env.LIMIT_PER_IP_DAY||40,GLOBAL_DAY=+process.env.LIMIT_GLOBAL_DAY||1500,BASE=(process.env.XAI_BASE||'https://api.x.ai/v1').replace(/\/+$/,''),PORT=process.env.PORT||3000;
+const KEY=process.env.GROQ_API_KEY,MODEL=process.env.GROQ_MODEL||'llama-3.3-70b-versatile',SEARCH_MODEL=process.env.GROQ_SEARCH_MODEL||'groq/compound',PER_MIN=+process.env.LIMIT_PER_MIN||10,PER_DAY=+process.env.LIMIT_PER_IP_DAY||10,GLOBAL_DAY=+process.env.LIMIT_GLOBAL_DAY||60,BASE='https://api.groq.com/openai/v1',PORT=process.env.PORT||3000;
 const json=(r,c,o)=>{r.writeHead(c,{'Content-Type':'application/json'});r.end(JSON.stringify(o))};
-// Limites anti-abuso (chamadas ao Grok; cada edição usa 1 a 2)
+// Limites anti-abuso (cada edição usa 1 a 2 chamadas)
 const mins=new Map(),days=new Map();let gDay='',gCount=0;
 const limited=ip=>{const n=Date.now(),d=new Date().toISOString().slice(0,10);if(d!==gDay){gDay=d;gCount=0;days.clear()}
   const a=(mins.get(ip)||[]).filter(t=>n-t<6e4);a.push(n);mins.set(ip,a);if(mins.size>5000)mins.clear();
@@ -20,14 +20,18 @@ console.log('[editor]',findEditor()||'NÃO ENCONTRADO em '+__dirname+' → '+ls(
 http.createServer(async(req,res)=>{
   try{
     if(req.url.startsWith('/api/')){
-      if(!KEY)return json(res,500,{error:'XAI_API_KEY não definida no servidor'});
+      if(!KEY)return json(res,500,{error:'GROQ_API_KEY não definida no servidor'});
       if(req.url!=='/api/models'){const m=limited(String(req.headers['x-forwarded-for']||req.socket.remoteAddress).split(',')[0].trim());if(m)return json(res,429,{error:m})}
       const h={Authorization:'Bearer '+KEY,'Content-Type':'application/json'};
       if(req.url==='/api/models'){const r=await fetch(BASE+'/models',{headers:h});return json(res,r.status,await r.json().catch(()=>({})))}
       if(req.url==='/api/grok'&&req.method==='POST'){
         let b='';for await(const c of req)if((b+=c).length>2e5)return json(res,413,{error:'pedido grande demais'});
-        const body=JSON.parse(b);body.model=body.model||MODEL;body.max_output_tokens=Math.min(+body.max_output_tokens||3000,3000);if(body.tools)body.tools=body.tools.filter(t=>t&&t.type==='web_search');
-        const r=await fetch(BASE+'/responses',{method:'POST',headers:h,body:JSON.stringify(body)});
+        const inp=JSON.parse(b),search=Array.isArray(inp.tools)&&inp.tools.some(t=>t&&t.type==='web_search');
+        const messages=(Array.isArray(inp.input)?inp.input:[{role:'user',content:String(inp.input||'')}]).map(m=>({role:m.role==='system'||m.role==='assistant'?m.role:'user',content:String(m.content)}));
+        const chosen=/^grok/i.test(inp.model||'')?'':(inp.model||'');
+        const body={model:search?SEARCH_MODEL:(chosen||MODEL),messages,max_tokens:3000,temperature:search?.5:.4};
+        if(!search)body.response_format={type:'json_object'};
+        const r=await fetch(BASE+'/chat/completions',{method:'POST',headers:h,body:JSON.stringify(body)});
         res.writeHead(r.status,{'Content-Type':'application/json'});return res.end(await r.text())}
       return json(res,404,{error:'rota inexistente'})}
     const f=findEditor();
